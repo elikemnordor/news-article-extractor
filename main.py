@@ -3,10 +3,17 @@ import os
 
 app = Flask(__name__)
 
-@app.route('/')
-def hello():
-    return 'hellooo'
+@app.route('/extract', methods=['GET'])
+def extract():
+    url = request.args.get('url')
 
-if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port)
+    if not url:
+        return jsonify({"error": "URL required"}), 400
+
+    try:
+        html = requests.get(url).text
+        text = trafilatura.extract(html)
+        return jsonify({"text": text})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
