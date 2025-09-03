@@ -1,4 +1,6 @@
-from flask import Flask
+from flask import Flask, request, jsonify
+import requests
+import trafilatura
 import os
 
 app = Flask(__name__)
@@ -17,3 +19,6 @@ def extract():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+
+if __name__ == "__main__":
+    app.run(debug=True)
