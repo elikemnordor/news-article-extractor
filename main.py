@@ -7,17 +7,21 @@ app = Flask(__name__)
 
 @app.route('/extract', methods=['GET'])
 def extract():
-    url = request.args.get('url')
+    urls = request.args.getlist('url')
 
-    if not url:
-        return jsonify({"error": "URL required"}), 400
+    if not urls:
+        return jsonify({"error": "At least one URL required"}), 400
 
-    try:
-        html = requests.get(url).text
-        text = trafilatura.extract(html)
-        return jsonify({"text": text})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+    results = []
+    for url in urls:
+        try:
+            html = requests.get(url).text
+            text = trafilatura.extract(html)
+            results.append({"url": url, "text": text, "success": True})
+        except Exception as e:
+            results.append({"url": url, "error": str(e), "success": False})
+    
+    return jsonify({"results": results})
 
 
 if __name__ == "__main__":
