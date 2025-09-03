@@ -7,137 +7,165 @@ from requests.adapters import HTTPAdapter
 
 app = Flask(__name__)
 
-def get_domain_headers(url):
-    """Return domain-specific headers for stubborn sites"""
-    try:
-        domain = url.split('/')[2].lower()
-    except IndexError:
-        domain = ""
-    
-    base_headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Accept-Encoding": "gzip, deflate, br, zstd",
-        "DNT": "1",
-        "Connection": "keep-alive",
-        "Upgrade-Insecure-Requests": "1",
-        "Cache-Control": "max-age=0",
-    }
-    
-    # Domain-specific tweaks for stubborn sites
-    if 'modernghana.com' in domain:
-        base_headers.update({
-            "Referer": "https://www.modernghana.com/",
-            "Sec-Fetch-Dest": "document",
-            "Sec-Fetch-Mode": "navigate",
-            "Sec-Fetch-Site": "same-origin",
-            "Sec-Fetch-User": "?1",
-        })
-    elif 'africanfinancials.com' in domain:
-        base_headers.update({
-            "Referer": "https://africanfinancials.com/",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Sec-Fetch-Dest": "document",
-            "Sec-Fetch-Mode": "navigate",
-            "Sec-Fetch-Site": "same-origin",
-        })
-    elif 'ghanaweb.com' in domain:
-        base_headers.update({
-            "Referer": "https://www.ghanaweb.com/",
-        })
-    
-    return base_headers
-
 def make_session():
-    """Create a requests session with retries and connection pooling"""
+    """Create a requests session with proper encoding handling"""
     s = requests.Session()
     
-    # Default headers - will be overridden per request
+    # Simple, reliable headers that work for most sites
     s.headers.update({
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate",  # Simplified encoding
         "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
     })
     
-    # Retry strategy
+    # Conservative retry strategy
     retry = Retry(
-        total=2,
-        connect=2,
-        read=1,
-        backoff_factor=0.6,
+        total=1,  # Reduced retries
+        connect=1,
+        read=0,  # No read retries to avoid timeouts
+        backoff_factor=0.3,
         status_forcelist=[429, 500, 502, 503, 504],
         allowed_methods=["GET"],
         raise_on_status=False,
     )
     
-    # HTTP adapter with connection pooling
-    adapter = HTTPAdapter(
-        max_retries=retry, 
-        pool_connections=100, 
-        pool_maxsize=100
-    )
+    adapter = HTTPAdapter(max_retries=retry, pool_connections=50, pool_maxsize=50)
     s.mount("http://", adapter)
     s.mount("https://", adapter)
     
     return s
 
-# Global session instance
+# Global session
 session = make_session()
 
-def fetch_and_extract(url: str):
-    """Fetch a single URL and extract text content"""
+def extract_text_fallback(html_content, url):
+    """Try multiple extraction methods"""
+    
+    # Method 1: trafilatura (primary)
+    text = trafilatura.extract(html_content)
+    if text and len(text.strip()) > 50:  # Reasonable content length
+        return text.strip()
+    
+    # Method 2: trafilatura with different settings
+    text = trafilatura.extract(
+        html_content, 
+        include_comments=False, 
+        include_tables=True,
+        no_fallback=False
+    )
+    if text and len(text.strip()) > 50:
+        return text.strip()
+    
+    # Method 3: Basic fallback - extract from common tags
     try:
-        # Get domain-specific headers
-        headers = get_domain_headers(url)
+        from html import unescape
+        import re
         
-        # Make request with custom headers
+        # Remove script and style tags
+        clean_html = re.sub(r'<script[^>]*>.*?</script>', '', html_content, flags=re.DOTALL | re.IGNORECASE)
+        clean_html = re.sub(r'<style[^>]*>.*?</style>', '', clean_html, flags=re.DOTALL | re.IGNORECASE)
+        
+        # Extract text from common content areas
+        patterns = [
+            r'<article[^>]*>(.*?)</article>',
+            r'<div[^>]*class="[^"]*content[^"]*"[^>]*>(.*?)</div>',
+            r'<div[^>]*class="[^"]*post[^"]*"[^>]*>(.*?)</div>',
+            r'<main[^>]*>(.*?)</main>',
+        ]
+        
+        for pattern in patterns:
+            matches = re.findall(pattern, clean_html, re.DOTALL | re.IGNORECASE)
+            if matches:
+                # Clean up the matched content
+                content = matches[0]
+                # Remove HTML tags
+                content = re.sub(r'<[^>]+>', ' ', content)
+                # Clean up whitespace
+                content = re.sub(r'\s+', ' ', content)
+                content = unescape(content).strip()
+                
+                if len(content) > 100:  # Reasonable content
+                    return content
+    except:
+        pass
+    
+    return None
+
+def fetch_and_extract(url: str):
+    """Fetch and extract with better error handling"""
+    try:
+        # Simple request with proper encoding handling
         resp = session.get(
-            url, 
-            headers=headers, 
-            timeout=(5, 25),  # 5s connect, 25s read
-            allow_redirects=True
+            url,
+            timeout=(5, 20),
+            allow_redirects=True,
+            stream=False  # Don't stream, get full content
         )
         resp.raise_for_status()
         
-        # Extract text content
-        text = trafilatura.extract(resp.text)
+        # Ensure proper encoding
+        if resp.encoding is None:
+            resp.encoding = 'utf-8'
         
-        return {
-            "url": url, 
-            "text": text, 
-            "success": True
-        }
+        # Get the HTML content
+        html_content = resp.text
         
+        # Validate we got HTML
+        if not html_content or len(html_content.strip()) < 100:
+            return {
+                "url": url,
+                "error": "Empty or too short response",
+                "success": False
+            }
+        
+        # Extract text with fallback methods
+        text = extract_text_fallback(html_content, url)
+        
+        if text:
+            return {
+                "url": url,
+                "text": text,
+                "success": True
+            }
+        else:
+            return {
+                "url": url,
+                "error": "Could not extract readable text content",
+                "success": False
+            }
+            
     except requests.exceptions.HTTPError as e:
+        status_code = e.response.status_code if e.response else 'unknown'
         return {
-            "url": url, 
-            "error": f"{e.response.status_code} {e.response.reason} for url: {url}", 
+            "url": url,
+            "error": f"{status_code} HTTP Error",
             "success": False
         }
     except requests.exceptions.Timeout:
         return {
-            "url": url, 
-            "error": "Request timeout", 
+            "url": url,
+            "error": "Request timeout",
             "success": False
         }
-    except requests.exceptions.ConnectionError:
+    except requests.exceptions.RequestException as e:
         return {
-            "url": url, 
-            "error": "Connection error", 
+            "url": url,
+            "error": f"Request failed: {str(e)[:100]}",
             "success": False
         }
     except Exception as e:
         return {
-            "url": url, 
-            "error": str(e), 
+            "url": url,
+            "error": f"Processing error: {str(e)[:100]}",
             "success": False
         }
 
 @app.route("/extract", methods=["GET"])
 def extract():
-    """Extract text from multiple URLs concurrently"""
+    """Extract text from URLs"""
     urls = request.args.getlist("url")
     
     if not urls:
@@ -145,66 +173,55 @@ def extract():
     
     print(f"[INFO] Processing {len(urls)} URLs")
     
-    # Limit concurrent requests to avoid overwhelming the server
-    max_workers = min(8, max(2, len(urls)))
+    # Process with limited concurrency
+    max_workers = min(6, len(urls))
     results = []
-    
-    # Overall deadline to prevent Gunicorn worker timeout
-    overall_deadline_seconds = 45
     
     try:
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
             # Submit all tasks
-            future_to_url = {
-                executor.submit(fetch_and_extract, url): url 
-                for url in urls
-            }
+            future_to_url = {executor.submit(fetch_and_extract, url): url for url in urls}
             
             # Collect results with timeout
-            for future in concurrent.futures.as_completed(
-                future_to_url, 
-                timeout=overall_deadline_seconds
-            ):
+            for future in concurrent.futures.as_completed(future_to_url, timeout=40):
                 try:
                     result = future.result()
                     results.append(result)
                 except Exception as e:
                     url = future_to_url[future]
                     results.append({
-                        "url": url, 
-                        "error": f"Processing error: {str(e)}", 
+                        "url": url,
+                        "error": f"Task failed: {str(e)[:100]}",
                         "success": False
                     })
                     
     except concurrent.futures.TimeoutError:
-        # Handle any remaining futures that didn't complete
+        # Handle incomplete futures
         for future, url in future_to_url.items():
             if not future.done():
                 results.append({
-                    "url": url, 
-                    "error": "Overall request deadline exceeded", 
+                    "url": url,
+                    "error": "Request timed out",
                     "success": False
                 })
     
-    print(f"[INFO] Completed {len(results)} results")
+    print(f"[INFO] Completed: {len(results)} results")
     
-    return jsonify({"results": results})
+    # Sort results to match input order
+    url_to_result = {r["url"]: r for r in results}
+    sorted_results = [url_to_result.get(url, {"url": url, "error": "Missing result", "success": False}) for url in urls]
+    
+    return jsonify({"results": sorted_results})
 
-@app.route("/health", methods=["GET"])
+@app.route("/health")
 def health():
-    """Simple health check endpoint"""
-    return jsonify({"status": "healthy", "service": "text-extractor"})
+    return jsonify({"status": "healthy"})
 
-@app.route("/", methods=["GET"])
+@app.route("/")
 def home():
-    """Basic info endpoint"""
     return jsonify({
         "service": "Text Extraction API",
-        "endpoints": {
-            "/extract": "Extract text from URLs (GET with ?url= params)",
-            "/health": "Health check"
-        },
-        "usage": "GET /extract?url=https://example.com&url=https://example2.com"
+        "usage": "GET /extract?url=https://example.com"
     })
 
 if __name__ == "__main__":
