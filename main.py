@@ -1,5 +1,5 @@
 from flask import Flask, request, jsonify
-import requests, trafilatura
+import requests, trafilatura, concurrent.futures
 from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
 
@@ -14,20 +14,28 @@ def make_session():
         "Connection": "keep-alive",
     })
     retry = Retry(
-        total=3,
-        connect=3,
-        read=2,
-        backoff_factor=0.8,
+        total=2, connect=2, read=1,
+        backoff_factor=0.6,
         status_forcelist=[429, 500, 502, 503, 504],
         allowed_methods=["GET"],
         raise_on_status=False,
     )
-    adapter = HTTPAdapter(max_retries=retry, pool_connections=50, pool_maxsize=50)
+    adapter = HTTPAdapter(max_retries=retry, pool_connections=100, pool_maxsize=100)
     s.mount("http://", adapter)
     s.mount("https://", adapter)
     return s
 
 session = make_session()
+
+def fetch_and_extract(url: str):
+    try:
+        # Split connect/read timeouts to fail fast on stalled reads
+        resp = session.get(url, timeout=(5, 20))
+        resp.raise_for_status()
+        text = trafilatura.extract(resp.text)
+        return {"url": url, "text": text, "success": True}
+    except Exception as e:
+        return {"url": url, "error": str(e), "success": False}
 
 @app.route("/extract", methods=["GET"])
 def extract():
@@ -35,13 +43,22 @@ def extract():
     if not urls:
         return jsonify({"error": "At least one URL required"}), 400
 
+    # Cap fan-out; adjust to your instance size
+    max_workers = min(10, max(2, len(urls)))
     results = []
-    for url in urls:
+
+    # Hard overall deadline per request to avoid worker timeouts
+    overall_deadline_seconds = 40
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
+        futures = {ex.submit(fetch_and_extract, u): u for u in urls}
         try:
-            resp = session.get(url, timeout=(5, 25))  # 5s connect, 25s read
-            resp.raise_for_status()
-            text = trafilatura.extract(resp.text)
-            results.append({"url": url, "text": text, "success": True})
-        except Exception as e:
-            results.append({"url": url, "error": str(e), "success": False})
+            for f in concurrent.futures.as_completed(futures, timeout=overall_deadline_seconds):
+                results.append(f.result())
+        except concurrent.futures.TimeoutError:
+            # Anything still running after deadline gets marked as timed out
+            for f, u in futures.items():
+                if not f.done():
+                    results.append({"url": u, "error": "deadline exceeded", "success": False})
+
     return jsonify({"results": results})
